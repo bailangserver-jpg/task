@@ -18,8 +18,8 @@ $ErrorActionPreference = "Stop"
 
 $ExpectedRepository = "bailangserver-jpg/AIBONIMA-BONITTLE"
 $RequiredScenes = @(
-    "Assets\Scenes\TitleMenu.unity",
-    "Assets\Scenes\Battle.unity"
+    "Assets\AIBONIMA\Scenes\TitleMenu.unity",
+    "Assets\AIBONIMA\Scenes\Battle.unity"
 )
 
 $artifactDir = $null
