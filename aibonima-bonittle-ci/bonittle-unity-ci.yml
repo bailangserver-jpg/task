@@ -26,7 +26,7 @@ jobs:
     timeout-minutes: 60
 
     env:
-      AIBONIMA_CI_ARTIFACT_DIR: ${{ runner.temp }}\\aibonima-ci-${{ github.run_id }}-${{ github.run_attempt }}
+      AIBONIMA_CI_ARTIFACT_DIR: ${{ runner.temp }}\aibonima-ci-${{ github.run_id }}-${{ github.run_attempt }}
 
     steps:
       - name: Checkout exact commit
@@ -41,9 +41,9 @@ jobs:
         continue-on-error: true
         shell: pwsh
         run: |
-          & "$env:GITHUB_WORKSPACE\\Tools\\CI\\Invoke-AibonimaUnityCI.ps1" `
+          & "$env:GITHUB_WORKSPACE\Tools\CI\Invoke-AibonimaUnityCI.ps1" `
             -ProjectPath "$env:GITHUB_WORKSPACE" `
-            -UnityExe "C:\\Program Files\\Unity\\Hub\\Editor\\6000.3.25f1\\Editor\\Unity.exe" `
+            -UnityExe "C:\Program Files\Unity\Hub\Editor\6000.3.25f1\Editor\Unity.exe" `
             -MinEditModeTests 4 `
             -MinPlayModeTests 1
 
