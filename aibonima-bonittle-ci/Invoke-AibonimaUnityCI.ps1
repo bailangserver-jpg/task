@@ -269,6 +269,25 @@ try {
     }
     New-Item -ItemType Directory -Path $artifactDir -Force | Out-Null
 
+    # Unity Test Framework can leave InitTestScene*.unity files behind in the
+    # dedicated runner checkout when a previous run is interrupted. These are
+    # CI-owned temporary files, not project content. Remove only this exact
+    # known pattern before enforcing the clean-checkout gate.
+    $ciTempScenes = @(
+        Get-ChildItem -LiteralPath (Join-Path $resolvedProject "Assets") `
+            -Filter "InitTestScene*.unity" `
+            -File `
+            -ErrorAction SilentlyContinue
+    )
+
+    foreach ($tempScene in $ciTempScenes) {
+        $meta = $tempScene.FullName + ".meta"
+        Remove-Item -LiteralPath $tempScene.FullName -Force
+        if (Test-Path -LiteralPath $meta -PathType Leaf) {
+            Remove-Item -LiteralPath $meta -Force
+        }
+    }
+
     $beforeStatus = @(Get-GitStatus -ResolvedProjectPath $resolvedProject)
     $summary["git"]["before"] = $beforeStatus
     if ($beforeStatus.Count -ne 0) {
@@ -342,7 +361,7 @@ try {
         "-logFile", $playLog,
         "-stackTraceLogType", "Full"
     )
-    $playExit = Invoke-UnityProcess -Name "PlayMode" -Arguments $playArgs -TimeoutSeconds 1500
+    $playExit = Invoke-UnityProcess -Name "PlayMode" -Arguments $playArgs -TimeoutSeconds 300
     $playResult = Read-TestResult -ResultPath $playXml -Name "PlayMode" -MinimumTests $MinPlayModeTests
     foreach ($key in $playResult.Keys) {
         $summary["playMode"][$key] = $playResult[$key]
