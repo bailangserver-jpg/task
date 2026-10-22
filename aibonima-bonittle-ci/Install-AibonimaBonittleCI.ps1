@@ -10,7 +10,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$BootstrapCommit = "bc576d562e45a968a6fcde0b2aad6b8cc0c0c6c2"
+$BootstrapCommit = "87a300befcae2de55501b5cadbdba81ac30d5103"
 $BootstrapBase = "https://raw.githubusercontent.com/bailangserver-jpg/task/$BootstrapCommit/aibonima-bonittle-ci"
 
 function Stop-Setup {
@@ -292,8 +292,15 @@ if (-not (Test-Path -LiteralPath $runnerConfig -PathType Leaf)) {
         Expand-Archive -LiteralPath $runnerZip -DestinationPath $runnerDir -Force
     }
 
-    $remoteRunner = & $gh api "repos/$RepoFullName/actions/runners" --jq ".runners[] | select(.name==\"$RunnerName\") | [.id,.status] | @tsv"
-    if ($LASTEXITCODE -eq 0 -and $remoteRunner) {
+    $runnerJson = & $gh api "repos/$RepoFullName/actions/runners"
+    if ($LASTEXITCODE -ne 0 -or -not $runnerJson) {
+        Stop-Setup "Failed to query existing repository runners."
+    }
+    $runnerResponse = $runnerJson | ConvertFrom-Json
+    $remoteRunner = $runnerResponse.runners |
+        Where-Object { $_.name -eq $RunnerName } |
+        Select-Object -First 1
+    if ($remoteRunner) {
         Stop-Setup "GitHub already has a runner named '$RunnerName', but local configuration is missing. Refusing to replace it automatically."
     }
 
@@ -332,7 +339,16 @@ cd /d "$runnerDir"
 start "" /min run.cmd
 "@ | Set-Content -LiteralPath $startupCmd -Encoding ASCII
 
-$currentStatus = (& $gh api "repos/$RepoFullName/actions/runners" --jq ".runners[] | select(.name==\"$RunnerName\") | .status").Trim()
+$runnerJson = & $gh api "repos/$RepoFullName/actions/runners"
+if ($LASTEXITCODE -ne 0 -or -not $runnerJson) {
+    Stop-Setup "Failed to query repository runner status."
+}
+$runnerResponse = $runnerJson | ConvertFrom-Json
+$currentRunner = $runnerResponse.runners |
+    Where-Object { $_.name -eq $RunnerName } |
+    Select-Object -First 1
+$currentStatus = if ($currentRunner) { [string]$currentRunner.status } else { "" }
+
 if ($currentStatus -ne "online") {
     Write-Host "Starting runner with normal user privileges..."
     Start-Process -FilePath "cmd.exe" -ArgumentList @("/c", "run.cmd") -WorkingDirectory $runnerDir -WindowStyle Minimized
@@ -342,7 +358,16 @@ Write-Host "Waiting for runner online status..."
 $online = $false
 for ($i = 0; $i -lt 20; $i++) {
     Start-Sleep -Seconds 2
-    $status = (& $gh api "repos/$RepoFullName/actions/runners" --jq ".runners[] | select(.name==\"$RunnerName\") | .status").Trim()
+    $runnerJson = & $gh api "repos/$RepoFullName/actions/runners"
+    if ($LASTEXITCODE -eq 0 -and $runnerJson) {
+        $runnerResponse = $runnerJson | ConvertFrom-Json
+        $currentRunner = $runnerResponse.runners |
+            Where-Object { $_.name -eq $RunnerName } |
+            Select-Object -First 1
+        $status = if ($currentRunner) { [string]$currentRunner.status } else { "" }
+    } else {
+        $status = ""
+    }
     if ($status -eq "online") {
         $online = $true
         break
