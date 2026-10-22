@@ -102,11 +102,33 @@ function Assert-RepositoryContext {
 function Get-GitStatus {
     param([Parameter(Mandatory)][string]$ResolvedProjectPath)
 
-    $output = & git -C $ResolvedProjectPath status --porcelain=v1 --untracked-files=all 2>&1
+    $changes = @()
+
+    $unstaged = @(& git -C $ResolvedProjectPath diff --name-status --no-ext-diff --ignore-submodules -- 2>$null)
     if ($LASTEXITCODE -ne 0) {
-        throw "git status failed: $($output -join [Environment]::NewLine)"
+        throw "git diff failed while checking worktree changes."
     }
-    return @($output)
+    foreach ($line in $unstaged) {
+        if ($line) { $changes += "WORKTREE $line" }
+    }
+
+    $staged = @(& git -C $ResolvedProjectPath diff --cached --name-status --no-ext-diff --ignore-submodules -- 2>$null)
+    if ($LASTEXITCODE -ne 0) {
+        throw "git diff --cached failed while checking staged changes."
+    }
+    foreach ($line in $staged) {
+        if ($line) { $changes += "STAGED $line" }
+    }
+
+    $untracked = @(& git -C $ResolvedProjectPath ls-files --others --exclude-standard 2>$null)
+    if ($LASTEXITCODE -ne 0) {
+        throw "git ls-files failed while checking untracked files."
+    }
+    foreach ($line in $untracked) {
+        if ($line) { $changes += "UNTRACKED $line" }
+    }
+
+    return @($changes)
 }
 
 function Invoke-UnityProcess {
@@ -335,6 +357,14 @@ try {
     $afterStatus = @(Get-GitStatus -ResolvedProjectPath $resolvedProject)
     $summary["git"]["after"] = $afterStatus
     $summary["git"]["clean"] = ($afterStatus.Count -eq 0)
+
+    $diffPath = Join-Path $artifactDir "git-diff-after.patch"
+    $diffOutput = & git -C $resolvedProject diff --no-ext-diff --binary 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        "git diff failed: $($diffOutput -join [Environment]::NewLine)" | Set-Content -LiteralPath $diffPath -Encoding UTF8
+    } else {
+        $diffOutput | Set-Content -LiteralPath $diffPath -Encoding UTF8
+    }
 
     $afterPath = Join-Path $artifactDir "git-status-after.txt"
     if ($afterStatus.Count -eq 0) {
