@@ -10,7 +10,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$BootstrapCommit = "319bea2c4d54e02bd7e9bb137aaed4ef36523a10"
+$BootstrapCommit = "bc576d562e45a968a6fcde0b2aad6b8cc0c0c6c2"
 $BootstrapBase = "https://raw.githubusercontent.com/bailangserver-jpg/task/$BootstrapCommit/aibonima-bonittle-ci"
 
 function Stop-Setup {
