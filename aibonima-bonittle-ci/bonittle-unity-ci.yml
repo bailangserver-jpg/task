@@ -12,7 +12,7 @@ permissions:
 
 concurrency:
   group: bonittle-unity-ci-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   unity-verification:
@@ -32,6 +32,84 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
           clean: false
+
+      - name: Stabilize runner watchdog
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $runnerDir = "C:\AIBONIMA-CI\runner"
+          $watchdogPath = "C:\AIBONIMA-CI\Watch-AibonimaRunner.ps1"
+
+          @'
+          $ErrorActionPreference = "SilentlyContinue"
+          $runnerDir = "C:\AIBONIMA-CI\runner"
+          $createdNew = $false
+          $mutex = New-Object System.Threading.Mutex($true, "AIBONIMA_BONITTLE_RUNNER_WATCHDOG", [ref]$createdNew)
+
+          if (-not $createdNew) {
+              $mutex.Dispose()
+              exit 0
+          }
+
+          try {
+              while ($true) {
+                  $activeRunner = Get-CimInstance Win32_Process |
+                      Where-Object {
+                          if ($_.Name -ne "Runner.Listener.exe" -and $_.Name -ne "Runner.Worker.exe") {
+                              return $false
+                          }
+
+                          if ($_.ExecutablePath) {
+                              return $_.ExecutablePath.StartsWith($runnerDir, [StringComparison]::OrdinalIgnoreCase)
+                          }
+
+                          if ($_.CommandLine) {
+                              return $_.CommandLine -like "*$runnerDir*"
+                          }
+
+                          # Some non-admin CIM queries hide ExecutablePath/CommandLine.
+                          # In that case, process name alone is safer than spawning a duplicate runner.
+                          return $true
+                      }
+
+                  if (-not $activeRunner) {
+                      Start-Process -FilePath "cmd.exe" `
+                          -WorkingDirectory $runnerDir `
+                          -ArgumentList "/c", "run.cmd" `
+                          -WindowStyle Hidden
+                      Start-Sleep -Seconds 20
+                  }
+                  else {
+                      Start-Sleep -Seconds 15
+                  }
+              }
+          }
+          finally {
+              if ($createdNew) {
+                  $mutex.ReleaseMutex()
+              }
+              $mutex.Dispose()
+          }
+          '@ | Set-Content -LiteralPath $watchdogPath -Encoding UTF8
+
+          $existingWatchdogs = Get-CimInstance Win32_Process -Filter "Name='pwsh.exe'" |
+              Where-Object {
+                  $_.ProcessId -ne $PID -and
+                  $_.CommandLine -and
+                  $_.CommandLine -like "*Watch-AibonimaRunner.ps1*"
+              }
+
+          foreach ($process in $existingWatchdogs) {
+              Stop-Process -Id $process.ProcessId -Force -ErrorAction SilentlyContinue
+          }
+
+          Start-Sleep -Seconds 1
+
+          Start-Process -FilePath "pwsh.exe" `
+              -ArgumentList "-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File", "`"$watchdogPath`"" `
+              -WindowStyle Hidden
+
+          Write-Host "Runner watchdog stabilized for Listener/Worker-aware monitoring."
 
       - name: Compile and run Unity tests
         id: unity_ci
@@ -54,6 +132,118 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
+      - name: Sync verified commit to local project
+        id: local_sync
+        if: steps.unity_ci.outcome == 'success' && github.ref == 'refs/heads/main'
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $localProject = "C:\Dev\AIBONIMA-BONITTLE"
+          $expectedPath = "C:\Dev\AIBONIMA-BONITTLE"
+          $expectedRepo = "https://github.com/bailangserver-jpg/AIBONIMA-BONITTLE"
+
+          if (-not (Test-Path -LiteralPath (Join-Path $localProject ".git") -PathType Container)) {
+            throw "Local BONITTLE Git repository is missing: $localProject"
+          }
+
+          $resolved = [IO.Path]::GetFullPath((Resolve-Path -LiteralPath $localProject).Path).TrimEnd('\')
+          if (-not $resolved.Equals($expectedPath, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Refusing local sync: unexpected project path '$resolved'."
+          }
+
+          $branch = (& git -C $resolved branch --show-current).Trim()
+          if ($LASTEXITCODE -ne 0 -or $branch -ne "main") {
+            throw "Refusing local sync: local branch must be main. Current='$branch'."
+          }
+
+          $localHead = (& git -C $resolved rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0) {
+            throw "Local project HEAD could not be read."
+          }
+
+          $worktreeChanges = @(& git -C $resolved diff --name-status --no-ext-diff --ignore-submodules -- 2>$null)
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to inspect local worktree changes."
+          }
+
+          $stagedChanges = @(& git -C $resolved diff --cached --name-status --no-ext-diff --ignore-submodules -- 2>$null)
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to inspect local staged changes."
+          }
+
+          $untracked = @(& git -C $resolved ls-files --others --exclude-standard 2>$null)
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to inspect local untracked files."
+          }
+
+          if ($worktreeChanges.Count -ne 0 -or $stagedChanges.Count -ne 0 -or $untracked.Count -ne 0) {
+            Write-Host "Local working copy was NOT modified because it contains user/local changes."
+            Write-Host "Local worktree changes:"
+            $worktreeChanges | ForEach-Object { Write-Host "  $_" }
+            Write-Host "Local staged changes:"
+            $stagedChanges | ForEach-Object { Write-Host "  $_" }
+            Write-Host "Local untracked files:"
+            $untracked | ForEach-Object { Write-Host "  $_" }
+            throw "Local working copy sync skipped safely."
+          }
+
+          $origin = (& git -C $resolved remote get-url origin).Trim()
+          if ($LASTEXITCODE -ne 0) {
+            throw "Local project origin could not be read."
+          }
+          $normalizedOrigin = $origin -replace '^git@github\.com:', 'https://github.com/'
+          if ($normalizedOrigin.EndsWith(".git", [StringComparison]::OrdinalIgnoreCase)) {
+            $normalizedOrigin = $normalizedOrigin.Substring(0, $normalizedOrigin.Length - 4)
+          }
+          if ($normalizedOrigin -ne $expectedRepo) {
+            throw "Refusing local sync: unexpected origin '$origin'."
+          }
+
+          & git -C $resolved fetch origin $env:GITHUB_SHA
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to fetch verified commit $env:GITHUB_SHA."
+          }
+
+          & git -C $resolved merge-base --is-ancestor $localHead $env:GITHUB_SHA
+          if ($LASTEXITCODE -ne 0) {
+            throw "Refusing local sync: verified commit is not a descendant of local main."
+          }
+
+          & git -C $resolved checkout $env:GITHUB_SHA -- .
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to materialize verified commit into the local BONITTLE project."
+          }
+
+          $targetTree = (& git -C $resolved rev-parse "$env:GITHUB_SHA^{tree}").Trim()
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to read verified target tree."
+          }
+
+          $indexTree = (& git -C $resolved write-tree).Trim()
+          if ($LASTEXITCODE -ne 0 -or $indexTree -ne $targetTree) {
+            throw "Local index tree does not exactly match the verified target tree."
+          }
+
+          & git -C $resolved update-ref refs/heads/main $env:GITHUB_SHA $localHead
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to advance local main with expected-head protection."
+          }
+
+          $head = (& git -C $resolved rev-parse HEAD).Trim()
+          if ($head -ne $env:GITHUB_SHA) {
+            throw "Local sync verification failed. HEAD='$head', expected='$env:GITHUB_SHA'."
+          }
+
+          $remainingWorktree = @(& git -C $resolved diff --name-status --no-ext-diff --ignore-submodules -- 2>$null)
+          $remainingStaged = @(& git -C $resolved diff --cached --name-status --no-ext-diff --ignore-submodules -- 2>$null)
+          $remainingUntracked = @(& git -C $resolved ls-files --others --exclude-standard 2>$null)
+          if ($remainingWorktree.Count -ne 0 -or $remainingStaged.Count -ne 0 -or $remainingUntracked.Count -ne 0) {
+            throw "Local sync completed ref update but the project is not clean."
+          }
+
+          Write-Host "Local BONITTLE project synced to verified commit $head."
+
       - name: Finalize result
         if: always()
         shell: pwsh
@@ -61,4 +251,12 @@ jobs:
           if ("${{ steps.unity_ci.outcome }}" -ne "success") {
             throw "AIBONIMA BONITTLE Unity CI failed. Check the uploaded CI evidence artifact."
           }
-          Write-Host "AIBONIMA BONITTLE Unity CI PASSED."
+          if ("${{ github.ref }}" -eq "refs/heads/main") {
+            if ("${{ steps.local_sync.outcome }}" -eq "success") {
+              Write-Host "AIBONIMA BONITTLE Unity CI PASSED. Local working copy sync also completed."
+            } else {
+              Write-Host "AIBONIMA BONITTLE Unity CI PASSED. Local working copy was intentionally left untouched."
+            }
+          } else {
+            Write-Host "AIBONIMA BONITTLE Unity CI PASSED on validation branch; local working copy was not touched."
+          }
